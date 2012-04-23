@@ -5,13 +5,14 @@ use strict;
 use warnings;
 
 use base 'MogileFS::Worker';
-use fields qw(querystarttime reqid);
+use fields qw(querystarttime reqid json jsonid);
 use MogileFS::Util qw(error error_code first weighted_list
                       device_state eurl decode_url_args);
 use MogileFS::HTTPFile;
 use MogileFS::Rebalance;
 use MogileFS::Config;
 use MogileFS::Server;
+use JSON;
 
 sub new {
     my ($class, $psock) = @_;
@@ -20,6 +21,8 @@ sub new {
 
     $self->{querystarttime} = undef;
     $self->{reqid}          = undef;
+    $self->{json}           = undef;
+    $self->{jsonid}         = undef;
     return $self;
 }
 
@@ -98,34 +101,54 @@ sub process_line {
     # Time::HiRes::tv_interval further on.
     $self->{querystarttime} = [ Time::HiRes::gettimeofday() ];
 
-    # fallback to normal command handling
-    if ($line =~ /^(\w+)\s*(.*)/) {
-        my ($cmd, $args) = ($1, $2);
-        $cmd = lc($cmd);
+    my ($cmd, $args);
 
-        no strict 'refs';
-        my $cmd_handler = *{"cmd_$cmd"}{CODE};
-        if ($cmd_handler) {
-            my $args = decode_url_args(\$args);
-            local $MogileFS::REQ_altzone = ($args->{zone} && $args->{zone} eq 'alt');
-            eval {
-                $cmd_handler->($self, $args);
-            };
-            if ($@) {
-                my $errc = error_code($@);
-                if ($errc eq "dup") {
-                    return $self->err_line("dup");
-                } else {
-                    warn "Error: $@\n";
-                    error("Error running command '$cmd': $@");
-                    return $self->err_line("failure");
-                }
-            }
-            return;
+    if ($line =~ /^\{/) {
+        my $json_cmd;
+        eval {
+            $json_cmd = JSON::decode_json($line);
+        };
+        if ($@) {
+            warn "Error: $@\n";
+            error("Error decoding json '$json_cmd': $@");
+            return $self->err_line('invalid_json');
         }
+        if ($json_cmd->{jsonrpc} ne "2.0") {
+            return $self->err_line('invalid_json_spec');
+        }
+        ($cmd, $args) = ($json_cmd->{method}, $json_cmd->{params});
+        $self->{json} = 1;
+        $self->{jsonid} = $json_cmd->{id};
+    } elsif ($line =~ /^(\w+)\s*(.*)/) {
+        # fallback to normal command handling
+        ($cmd, $args) = ($1, decode_url_args(\$2));
+        $self->{json} = undef;
+        $self->{jsonid} = undef
+    } else {
+        return $self->err_line('unknown_command');
     }
 
-    return $self->err_line('unknown_command');
+    $cmd = lc($cmd);
+
+    no strict 'refs';
+    my $cmd_handler = *{"cmd_$cmd"}{CODE};
+    if ($cmd_handler) {
+        local $MogileFS::REQ_altzone = ($args->{zone} && $args->{zone} eq 'alt');
+        eval {
+            $cmd_handler->($self, $args);
+        };
+        if ($@) {
+            my $errc = error_code($@);
+            if ($errc eq "dup") {
+                return $self->err_line("dup");
+            } else {
+                warn "Error: $@\n";
+                error("Error running command '$cmd': $@");
+                return $self->err_line("failure");
+            }
+        }
+        return;
+    }
 }
 
 # this is a half-finished command.  in particular, errors tend to
@@ -1710,8 +1733,15 @@ sub ok_line {
     my $id = defined $self->{reqid} ? "$self->{reqid} " : '';
 
     my $args = shift || {};
-    my $argline = join('&', map { eurl($_) . "=" . eurl($args->{$_}) } keys %$args);
-    $self->send_to_parent("${id}${delay}OK $argline");
+    if ($self->{json}) {
+        my $argline = encode_json({'jsonrpc' => '2.0', 'result' => $args, 'id' => $self->{jsonid}});
+        $self->{jsonid} = undef;
+        $self->{json} = undef;
+        $self->send_to_parent("${id}${delay}$argline");
+    } else {
+        my $argline = join('&', map { eurl($_) . "=" . eurl($args->{$_}) } keys %$args);
+        $self->send_to_parent("${id}${delay}OK $argline");
+    }
     return 1;
 }
 
@@ -1771,7 +1801,14 @@ sub err_line {
 
     my $id = defined $self->{reqid} ? "$self->{reqid} " : '';
 
-    $self->send_to_parent("${id}${delay}ERR $err_code " . eurl($err_text));
+    if ($self->{json}) {
+        my $argline = encode_json({'jsonrpc' => '2.0', 'error' => {'code' => $err_code, 'message' => $err_text}, 'id' => $self->{jsonid}});
+        $self->{jsonid} = undef;
+        $self->{json} = undef;
+        $self->send_to_parent("${id}${delay}$argline");
+    } else {
+        $self->send_to_parent("${id}${delay}ERR $err_code " . eurl($err_text));
+    }
     return 0;
 }
 
