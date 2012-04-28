@@ -13,6 +13,7 @@ use MogileFS::Rebalance;
 use MogileFS::Config;
 use MogileFS::Server;
 use JSON;
+use List::Util qw/max/;
 
 sub new {
     my ($class, $psock) = @_;
@@ -319,25 +320,38 @@ sub cmd_create_open {
 
     # add profiling data
     if (@profpoints) {
-        $res->{profpoints} = 0;
-        for (my $i=0; $i<$#profpoints; $i++) {
-            my $ptnum = ++$res->{profpoints};
-            $res->{"prof_${ptnum}_name"} = $profpoints[$i]->[0];
-            $res->{"prof_${ptnum}_time"} =
-                sprintf("%0.03f",
-                        $profpoints[$i+1]->[1] - $profpoints[$i]->[1]);
+        if ($self->{json}) {
+            $res->{profpoints} = [];
+            for (my $i=0; $i<$#profpoints; $i++) {
+                push(@{$res->{profpoints}}, {name => $profpoints[$i]->[0],
+                        time => $profpoints[$i+1]->[1] - $profpoints[$i]->[1]});
+            }
+        } else {
+            $res->{profpoints} = 0;
+            for (my $i=0; $i<$#profpoints; $i++) {
+                my $ptnum = ++$res->{profpoints};
+                $res->{"prof_${ptnum}_name"} = $profpoints[$i]->[0];
+                $res->{"prof_${ptnum}_time"} = sprintf("%0.03f",
+                            $profpoints[$i+1]->[1] - $profpoints[$i]->[1]);
+            }
         }
+
     }
 
     # add path info
     if ($multi) {
-        my $ct = 0;
-        foreach my $dev (@dests) {
-            $ct++;
-            $res->{"devid_$ct"} = $dev->id;
-            $res->{"path_$ct"} = MogileFS::DevFID->new($dev, $fidid)->url;
+        if ($self->{json}) {
+            $res->{dests} = [ map { {devid => $_->id,
+            path => MogileFS::DevFID->new($_, $fidid)->url} } @dests ];
+        } else {
+            my $ct = 0;
+            foreach my $dev (@dests) {
+                $ct++;
+                $res->{"devid_$ct"} = $dev->id;
+                $res->{"path_$ct"} = MogileFS::DevFID->new($dev, $fidid)->url;
+            }
+            $res->{dev_count} = $ct;
         }
-        $res->{dev_count} = $ct;
     } else {
         $res->{devid} = $dests[0]->id;
         $res->{path}  = MogileFS::DevFID->new($dests[0], $fidid)->url;
@@ -597,15 +611,20 @@ sub cmd_file_debug {
 
     # Fetch file_on rows, and turn into paths.
     my @devids = $sto->fid_devids($fidid);
-    for my $devid (@devids) {
-        # Won't matter if we can't make the path (dev is dead/deleted/etc)
-        eval {
-            my $dfid = MogileFS::DevFID->new($devid, $fidid);
-            my $path = $dfid->get_url;
-            $ret->{'devpath_' . $devid} = $path;
-        };
+    if ($self->{json}) {
+        $ret->{devids} = [ map { {$_ =>
+            eval { MofileFS::DevFID->new($_, $fidid)->get_url }} } @devids ];
+    } else {
+        for my $devid (@devids) {
+            # Won't matter if we can't make the path (dev is dead/deleted/etc)
+            eval {
+                my $dfid = MogileFS::DevFID->new($devid, $fidid);
+                my $path = $dfid->get_url;
+                $ret->{'devpath_' . $devid} = $path;
+            };
+        }
+        $ret->{devids} = join(',', @devids) if @devids;
     }
-    $ret->{devids} = join(',', @devids) if @devids;
 
     # Always look for a checksum
     my $checksum = Mgd::get_store()->get_checksum($fidid);
@@ -672,7 +691,11 @@ sub cmd_file_info {
     # Only if requested, also return the raw devids.
     # Caller should use get_paths if they intend to fetch the file.
     if ($args->{devices}) {
-        $ret->{devids} = join(',', $fid->devids);
+        if ($self->{json}) {
+            $ret->{devids} = $fid->devids;
+        } else {
+            $ret->{devids} = join(',', $fid->devids);
+        }
     }
 
     return $self->ok_line($ret);
@@ -690,27 +713,40 @@ sub cmd_list_fids {
 
     my $rows = Mgd::get_store()->file_row_from_fidid_range($fromfid, $count);
     return $self->err_line('failure') unless $rows;
-    return $self->ok_line({ fid_count => 0 }) unless @$rows;
+    if (!$self->{json}) {
+        return $self->ok_line({ fid_count => 0 }) unless @$rows;
+    }
 
     # setup temporary storage of class/host
     my (%domains, %classes);
 
     # now iterate over our data rows and construct result
-    my $ct = 0;
-    my $ret = {};
-    foreach my $r (@$rows) {
-        $ct++;
-        my $fid = $r->{fid};
-        $ret->{"fid_${ct}_fid"} = $fid;
-        $ret->{"fid_${ct}_domain"} = ($domains{$r->{dmid}} ||=
-            Mgd::domain_factory()->get_by_id($r->{dmid})->name);
-        $ret->{"fid_${ct}_class"} = ($classes{$r->{dmid}}{$r->{classid}} ||=
-            Mgd::class_factory()->get_by_id($r->{dmid}, $r->{classid})->name);
-        $ret->{"fid_${ct}_key"} = $r->{dkey};
-        $ret->{"fid_${ct}_length"} = $r->{length};
-        $ret->{"fid_${ct}_devcount"} = $r->{devcount};
+    my $ret;
+    if ($self->{json}) {
+        $ret = [ map { {fid => $_->{fid},
+            domain => ($domains{$_->{dmid}} ||=
+            Mgd::domain_factory()->get_by_id($_->{dmid})->name),
+            class => ($classes{$_->{dmid}}{$_->{classid}} ||=
+            Mgd::class_factory()->get_by_id($_->{dmid}, $_->{classid})->name),
+            key => $_->{dkey},
+            length => $_->{length},
+            devcount => $_->{devcount} } } @$rows ];
+    } else {
+        my $ct = 0;
+        foreach my $r (@$rows) {
+            $ct++;
+            my $fid = $r->{fid};
+            $ret->{"fid_${ct}_fid"} = $fid;
+            $ret->{"fid_${ct}_domain"} = ($domains{$r->{dmid}} ||=
+                Mgd::domain_factory()->get_by_id($r->{dmid})->name);
+            $ret->{"fid_${ct}_class"} = ($classes{$r->{dmid}}{$r->{classid}} ||=
+                Mgd::class_factory()->get_by_id($r->{dmid}, $r->{classid})->name);
+            $ret->{"fid_${ct}_key"} = $r->{dkey};
+            $ret->{"fid_${ct}_length"} = $r->{length};
+            $ret->{"fid_${ct}_devcount"} = $r->{devcount};
+        }
+        $ret->{fid_count} = $ct;
     }
-    $ret->{fid_count} = $ct;
     return $self->ok_line($ret);
 }
 
@@ -746,12 +782,17 @@ sub cmd_list_keys {
     return $self->err_line('none_match') unless $keys && @$keys;
 
     # construct the output and send
-    my $ret = { key_count => 0, next_after => '' };
-    foreach my $key (@$keys) {
-        $ret->{key_count}++;
-        $ret->{next_after} = $key
-            if $key gt $ret->{next_after};
-        $ret->{"key_$ret->{key_count}"} = $key;
+    my $ret;
+    if ($self->{json}) {
+        $ret = { keys => @$keys, next_after => max @$keys};
+    } else {
+        $ret = { key_count => 0, next_after => '' };
+        foreach my $key (@$keys) {
+            $ret->{key_count}++;
+            $ret->{next_after} = $key
+                if $key gt $ret->{next_after};
+            $ret->{"key_$ret->{key_count}"} = $key;
+        }
     }
     return $self->ok_line($ret);
 }
@@ -779,15 +820,25 @@ sub cmd_get_hosts {
     my MogileFS::Worker::Query $self = shift;
     my $args = shift;
 
-    my $ret = { hosts => 0 };
-    for my $host (Mgd::host_factory()->get_all) {
-        next if defined $args->{hostid} && $host->id != $args->{hostid};
-        my $n = ++$ret->{hosts};
-        my $fields = $host->fields(qw(hostid status hostname hostip http_port
-            http_get_port altip altmask));
-        while (my ($key, $val) = each %$fields) {
-            # must be regular data so copy it in
-            $ret->{"host${n}_$key"} = $val;
+    my $ret;
+    if ($self->{json}) {
+        $ret = [];
+        for my $host (Mgd::host_factory()->get_all) {
+            next if defined $args->{hostid} && $host->id != $args->{hostid};
+            push(@$ret, $host->fields(qw(hostid status hostname hostip http_port
+                http_get_port altip altmask)));
+        }
+    } else {
+        $ret = { hosts => 0 };
+        for my $host (Mgd::host_factory()->get_all) {
+            next if defined $args->{hostid} && $host->id != $args->{hostid};
+            my $n = ++$ret->{hosts};
+            my $fields = $host->fields(qw(hostid status hostname hostip http_port
+                http_get_port altip altmask));
+            while (my ($key, $val) = each %$fields) {
+                # must be regular data so copy it in
+                $ret->{"host${n}_$key"} = $val;
+            }
         }
     }
 
@@ -798,14 +849,23 @@ sub cmd_get_devices {
     my MogileFS::Worker::Query $self = shift;
     my $args = shift;
 
-    my $ret = { devices => 0 };
-    for my $dev (Mgd::device_factory()->get_all) {
-        next if defined $args->{devid} && $dev->id != $args->{devid};
-        my $n = ++$ret->{devices};
+    my $ret;
+    if ($self->{json}) {
+        $ret = [];
+        for my $dev (Mgd::device_factory()->get_all) {
+            next if defined $args->{devid} && $dev->id != $args->{devid};
+            push(@$ret, $dev->fields());
+        }
+    } else {
+        $ret = { devices => 0 };
+        for my $dev (Mgd::device_factory()->get_all) {
+            next if defined $args->{devid} && $dev->id != $args->{devid};
+            my $n = ++$ret->{devices};
 
-        my $sum = $dev->fields;
-        while (my ($key, $val) = each %$sum) {
-            $ret->{"dev${n}_$key"} = $val;
+            my $sum = $dev->fields;
+            while (my ($key, $val) = each %$sum) {
+                $ret->{"dev${n}_$key"} = $val;
+            }
         }
     }
 
@@ -1054,23 +1114,33 @@ sub cmd_get_domains {
     my MogileFS::Worker::Query $self = shift;
     my $args = shift;
 
-    my $ret = {};
-    my $dm_n = 0;
-    for my $dom (Mgd::domain_factory()->get_all) {
-        $dm_n++;
-        $ret->{"domain${dm_n}"} = $dom->name;
-        my $cl_n = 0;
-        foreach my $cl ($dom->classes) {
-            $cl_n++;
-            $ret->{"domain${dm_n}class${cl_n}name"}        = $cl->name;
-            $ret->{"domain${dm_n}class${cl_n}mindevcount"} = $cl->mindevcount;
-            $ret->{"domain${dm_n}class${cl_n}replpolicy"}  =
-                $cl->repl_policy_string;
-            $ret->{"domain${dm_n}class${cl_n}hashtype"} = $cl->hashtype_string;
+    my $ret;
+    if ($self->{json}) {
+        $ret = [ map { {name => $_->name,
+            classes => [ map { {name => $_->name,
+                mindevcount => $_->mindevcount,
+                replpolicy => $_->repl_policy_string,
+                hashtype => $_->hashtype_string} } $_->classes] } }
+            Mgd::domain_factory()->get_all ];
+    } else {
+        $ret = {};
+        my $dm_n = 0;
+        for my $dom (Mgd::domain_factory()->get_all) {
+            $dm_n++;
+            $ret->{"domain${dm_n}"} = $dom->name;
+            my $cl_n = 0;
+            foreach my $cl ($dom->classes) {
+                $cl_n++;
+                $ret->{"domain${dm_n}class${cl_n}name"}        = $cl->name;
+                $ret->{"domain${dm_n}class${cl_n}mindevcount"} = $cl->mindevcount;
+                $ret->{"domain${dm_n}class${cl_n}replpolicy"}  =
+                    $cl->repl_policy_string;
+                $ret->{"domain${dm_n}class${cl_n}hashtype"} = $cl->hashtype_string;
+            }
+            $ret->{"domain${dm_n}classes"} = $cl_n;
         }
-        $ret->{"domain${dm_n}classes"} = $cl_n;
+        $ret->{"domains"} = $dm_n;
     }
-    $ret->{"domains"} = $dm_n;
 
     return $self->ok_line($ret);
 }
@@ -1130,9 +1200,7 @@ sub cmd_get_paths {
 
     my $dmap = Mgd::device_factory()->map_by_id;
 
-    my $ret = {
-        paths => 0,
-    };
+    my $ret = [];
 
     # find devids that FID is on in memcache or db.
     my @fid_devids;
@@ -1180,19 +1248,27 @@ sub cmd_get_paths {
 
         # only verify size one first one, and never verify if they've asked not to
         next unless
-            $ret->{paths}        ||
+            @$ret        ||
             $args->{noverify}    ||
             $dfid->size_matches;
 
-        my $n = ++$ret->{paths};
-        $ret->{"path$n"} = $path;
-        last if $n == $pathcount;   # one verified, one likely seems enough for now.  time will tell.
+        push(@$ret, $path);
+        last if @$ret == $pathcount;   # one verified, one likely seems enough for now.  time will tell.
     }
 
     # use our backup path if all else fails
     if ($backup_path && ! $ret->{paths}) {
-        $ret->{paths} = 1;
-        $ret->{path1} = $backup_path;
+        $ret = [$backup_path];
+    }
+    if (!$self->{json}) {
+        my $paths = $ret;
+        $ret = {
+            paths => 0,
+        };
+        for my $path (@$paths) {
+            my $n = ++$ret->{paths};
+            $ret->{"path$n"} = $path;
+        }
     }
 
     return $self->ok_line($ret);
@@ -1464,6 +1540,9 @@ sub cmd_server_setting {
     my $key = $args->{key};
     return $self->err_line("bad_params") unless $key;
     my $value = MogileFS::Config->server_setting($key);
+    if ($self->{json}) {
+        return $self->ok_line({$key -> $value});
+    }
     return $self->ok_line({key => $key, value => $value});
 }
 
@@ -1472,11 +1551,18 @@ sub cmd_server_settings {
     my $ss = Mgd::get_store()->server_settings;
     my $ret = {};
     my $n = 0;
-    while (my ($k, $v) = each %$ss) {
-        next unless MogileFS::Config->server_setting_is_readable($k);
-        $ret->{"key_count"} = ++$n;
-        $ret->{"key_$n"}    = $k;
-        $ret->{"value_$n"}  = $v;
+    if ($self->{json}) {
+        while (my ($k, $v) = each %$ss) {
+            next unless MogileFS::Config->server_setting_is_readable($k);
+            $ret->{$k} = $v
+        }
+    } else {
+        while (my ($k, $v) = each %$ss) {
+            next unless MogileFS::Config->server_setting_is_readable($k);
+            $ret->{"key_count"} = ++$n;
+            $ret->{"key_$n"}    = $k;
+            $ret->{"value_$n"}  = $v;
+        }
     }
     return $self->ok_line($ret);
 }
@@ -1576,6 +1662,9 @@ sub cmd_fsck_getlog {
     my $args = shift;
 
     my $sto = Mgd::get_store();
+    if ($self->json) {
+        return $self->ok_line($sto->fsck_log_rows($args->{after_logid}, 100));
+    }
     my @rows = $sto->fsck_log_rows($args->{after_logid}, 100);
     my $ret;
     my $n = 0;
@@ -1674,8 +1763,13 @@ sub cmd_rebalance_test {
     my $sdevs = $rebal->filter_source_devices(\@devs);
     my $ddevs = $rebal->filter_dest_devices(\@devs);
     my $ret   = {};
-    $ret->{sdevs} = join(',', @$sdevs);
-    $ret->{ddevs} = join(',', @$ddevs);
+    if ($self->{json}) {
+        $ret->{sdevs} = @$sdevs;
+        $ret->{ddevs} = @$ddevs;
+    } else {
+        $ret->{sdevs} = join(',', @$sdevs);
+        $ret->{ddevs} = join(',', @$ddevs);
+    }
 
     return $self->ok_line($ret);
 }
