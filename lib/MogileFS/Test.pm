@@ -142,6 +142,7 @@ sub create_mogstored {
         $pid = fork();
         die "failed to fork: $!" unless defined $pid;
         unless ($pid) {
+            setpgrp;
             exec(@args);
         }
     }
