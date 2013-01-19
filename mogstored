@@ -123,6 +123,7 @@ my $parent_pid = $$;
 $SIG{TERM} = $SIG{INT} = sub {
     return unless $$ == $parent_pid; # don't let this be inherited
     kill 'TERM', grep { $_ } keys %on_death;
+    $httpsrv->stop;
     POSIX::_exit(0);
 };
 
@@ -134,6 +135,10 @@ setup_sidechannel_listener();
 
 # now start the main loop
 Perlbal::run();
+
+END {
+    $httpsrv->stop if $$ == $parent_pid;
+}
 
 ############################################################################
 
