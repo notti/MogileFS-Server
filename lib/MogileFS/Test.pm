@@ -128,6 +128,9 @@ sub create_mogstored {
                 "--mgmtlisten=$ip:7501",
                 "--maxconns=1000",  # because we're not root, put it below 1024
                 "--docroot=$root");
+    if ($ENV{MOGTEST_MOGSTORED}) {
+        push @args, "--server=$ENV{MOGTEST_MOGSTORED}";
+    }
 
     my $pid;
     if ($daemonize) {
