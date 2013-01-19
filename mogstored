@@ -97,14 +97,16 @@ my $httpsrv       = $httpsrv_class->new(
                                         maxconns => $max_conns,
                                         bin      => $serverbin,
                                         );
-$httpsrv->start;
+
+$httpsrv->pre_daemonize;
 
 if ($opt_daemonize) {
-    $httpsrv->pre_daemonize;
     Perlbal::daemonize();
 } else {
     print "Running.\n";
 }
+
+$httpsrv->start;
 
 $httpsrv->post_daemonize;
 
@@ -126,6 +128,10 @@ setup_sidechannel_listener();
 
 # now start the main loop
 Perlbal::run();
+
+END {
+    $httpsrv->stop if $$ == $parent_pid;
+}
 
 ############################################################################
 

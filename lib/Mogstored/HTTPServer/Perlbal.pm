@@ -10,7 +10,11 @@ BEGIN {
 }
 
 sub start {
+}
+
+sub pre_daemonize {
     my $self = shift;
+    die "mogstored won't daemonize with \$ENV{MOGSTORED_RUN_WITHOUT_AIO} set.\n" if $ENV{'MOGSTORED_RUN_WITHOUT_AIO'};
 
     unless ($OPTMOD_IO_AIO) {
         if ($ENV{'MOGSTORED_RUN_WITHOUT_AIO'}) {
@@ -54,11 +58,6 @@ ENABLE mogstored
     unless (Perlbal::Socket->WatchedSockets > 0) {
         die "Invalid configuration.  (shouldn't happen?)  Stopping.\n";
     }
-}
-
-sub pre_daemonize {
-    my $self = shift;
-    die "mogstored won't daemonize with \$ENV{MOGSTORED_RUN_WITHOUT_AIO} set.\n" if $ENV{'MOGSTORED_RUN_WITHOUT_AIO'};
 }
 
 sub post_daemonize {

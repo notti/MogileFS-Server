@@ -11,6 +11,8 @@ use base 'Exporter';
 
 our @EXPORT = qw(&find_mogclient_or_skip &temp_store &create_mogstored &create_temp_tracker &try_for);
 
+$SIG{TERM} = $SIG{INT} =  sub { die; };
+
 sub find_mogclient_or_skip {
 
     # needed for running "make test" from project root directory, with
